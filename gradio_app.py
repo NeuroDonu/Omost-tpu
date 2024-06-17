@@ -10,6 +10,7 @@ import torch
 import numpy as np
 import gradio as gr
 import tempfile
+import torch_xla as xla
 
 gradio_temp_dir = os.path.join(tempfile.gettempdir(), 'gradio')
 os.makedirs(gradio_temp_dir, exist_ok=True)
@@ -76,7 +77,7 @@ llm_model = AutoModelForCausalLM.from_pretrained(
     llm_name,
     torch_dtype=torch.bfloat16,  # This is computation type, not load/memory type. The loading quant type is baked in config.
     token=HF_TOKEN,
-    device_map="auto"  # This will load model to gpu with an offload system
+    device_map="auto"  # This will load model to xla with an offload system
 )
 
 llm_tokenizer = AutoTokenizer.from_pretrained(
@@ -125,7 +126,7 @@ def chat_fn(message: str, history: list, seed:int, temperature: float, top_p: fl
 
     conversation.append({"role": "user", "content": message})
 
-    memory_management.load_models_to_gpu(llm_model)
+    memory_management.load_models_to_xla(llm_model)
 
     input_ids = llm_tokenizer.apply_chat_template(
         conversation, return_tensors="pt", add_generation_prompt=True).to(llm_model.device)
@@ -194,14 +195,14 @@ def diffusion_fn(chatbot, canvas_outputs, num_samples, seed, image_width, image_
 
     image_width, image_height = int(image_width // 64) * 64, int(image_height // 64) * 64
 
-    rng = torch.Generator(device=memory_management.gpu).manual_seed(seed)
+    rng = torch.Generator(device=memory_management.xla).manual_seed(seed)
 
-    memory_management.load_models_to_gpu([text_encoder, text_encoder_2])
+    memory_management.load_models_to_xla([text_encoder, text_encoder_2])
 
     positive_cond, positive_pooler, negative_cond, negative_pooler = pipeline.all_conds_from_canvas(canvas_outputs, negative_prompt)
 
     if use_initial_latent:
-        memory_management.load_models_to_gpu([vae])
+        memory_management.load_models_to_xla([vae])
         initial_latent = torch.from_numpy(canvas_outputs['initial_latent'])[None].movedim(-1, 1) / 127.5 - 1.0
         initial_latent_blur = 40
         initial_latent = torch.nn.functional.avg_pool2d(
@@ -213,7 +214,7 @@ def diffusion_fn(chatbot, canvas_outputs, num_samples, seed, image_width, image_
     else:
         initial_latent = torch.zeros(size=(num_samples, 4, image_height // 8, image_width // 8), dtype=torch.float32)
 
-    memory_management.load_models_to_gpu([unet])
+    memory_management.load_models_to_xla([unet])
 
     initial_latent = initial_latent.to(dtype=unet.dtype, device=unet.device)
 
@@ -230,7 +231,7 @@ def diffusion_fn(chatbot, canvas_outputs, num_samples, seed, image_width, image_
         guidance_scale=float(cfg),
     ).images
 
-    memory_management.load_models_to_gpu([vae])
+    memory_management.load_models_to_xla([vae])
     latents = latents.to(dtype=vae.dtype, device=vae.device) / vae.config.scaling_factor
     pixels = vae.decode(latents).sample
     B, C, H, W = pixels.shape
@@ -248,7 +249,7 @@ def diffusion_fn(chatbot, canvas_outputs, num_samples, seed, image_width, image_
         pixels = numpy2pytorch(pixels).to(device=vae.device, dtype=vae.dtype)
         latents = vae.encode(pixels).latent_dist.mode() * vae.config.scaling_factor
 
-        memory_management.load_models_to_gpu([unet])
+        memory_management.load_models_to_xla([unet])
         latents = latents.to(device=unet.device, dtype=unet.dtype)
 
         latents = pipeline(
@@ -264,7 +265,7 @@ def diffusion_fn(chatbot, canvas_outputs, num_samples, seed, image_width, image_
             guidance_scale=float(cfg),
         ).images
 
-        memory_management.load_models_to_gpu([vae])
+        memory_management.load_models_to_xla([vae])
         latents = latents.to(dtype=vae.dtype, device=vae.device) / vae.config.scaling_factor
         pixels = vae.decode(latents).sample
         pixels = pytorch2numpy(pixels)
